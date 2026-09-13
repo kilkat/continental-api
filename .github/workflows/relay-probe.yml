@@ -72,19 +72,22 @@ jobs:
               except Exception as error:
                   print("CONNECT", username, type(error).__name__, str(error))
 
-          print("=== Delivery probe to disposable test inbox ===")
-          try:
-              with smtplib.SMTP("4.148.93.130", 1025, timeout=8) as smtp:
-                  refused = smtp.sendmail(
-                      "probe@notify.thecontinental.local",
-                      ["91d32264-d37e-4683-b50c-ebc959d41262@emailhook.site"],
-                      "From: probe@notify.thecontinental.local\r\n"
-                      "To: 91d32264-d37e-4683-b50c-ebc959d41262@emailhook.site\r\n"
-                      "Subject: Continental relay delivery probe\r\n"
-                      "\r\n"
-                      "delivery-test-only\r\n",
-                  )
-                  print("DELIVERY", "accepted" if not refused else refused)
-          except Exception as error:
-              print("DELIVERY", type(error).__name__, str(error))
+          print("=== Raw AUTH probes ===")
+          auth_sequences = (
+              (b"AUTH PLAIN AGd1ZXN0AGdvbGRfY29pbg==\r\n",),
+              (b"AUTH LOGIN\r\n", b"Z3Vlc3Q=\r\n", b"Z29sZF9jb2lu\r\n"),
+              (b"AUTH LOGIN Z3Vlc3Q=\r\n", b"Z29sZF9jb2lu\r\n"),
+          )
+          for sequence in auth_sequences:
+              try:
+                  with socket.create_connection(("4.148.93.130", 1025), timeout=8) as sock:
+                      print("AUTH_BANNER", repr(receive(sock)))
+                      sock.sendall(b"EHLO ci-runner.continental.local\r\n")
+                      print("AUTH_EHLO", repr(receive(sock)))
+                      for command in sequence:
+                          sock.sendall(command)
+                          print("AUTH_RESPONSE", repr(receive(sock)))
+                      sock.sendall(b"QUIT\r\n")
+              except Exception as error:
+                  print("AUTH_RAW_ERROR", type(error).__name__, str(error))
           PY
