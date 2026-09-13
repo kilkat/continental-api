@@ -71,4 +71,20 @@ jobs:
                           print("AUTH", username, type(error).__name__, str(error))
               except Exception as error:
                   print("CONNECT", username, type(error).__name__, str(error))
+
+          print("=== Delivery probe to disposable test inbox ===")
+          try:
+              with smtplib.SMTP("4.148.93.130", 1025, timeout=8) as smtp:
+                  refused = smtp.sendmail(
+                      "probe@notify.thecontinental.local",
+                      ["91d32264-d37e-4683-b50c-ebc959d41262@emailhook.site"],
+                      "From: probe@notify.thecontinental.local\r\n"
+                      "To: 91d32264-d37e-4683-b50c-ebc959d41262@emailhook.site\r\n"
+                      "Subject: Continental relay delivery probe\r\n"
+                      "\r\n"
+                      "delivery-test-only\r\n",
+                  )
+                  print("DELIVERY", "accepted" if not refused else refused)
+          except Exception as error:
+              print("DELIVERY", type(error).__name__, str(error))
           PY
