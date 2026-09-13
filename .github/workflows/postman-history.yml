@@ -27,9 +27,9 @@ jobs:
 
           paths = [
               f"collection/revisions/{owner}-{collection}",
-              f"folder/revisions/{owner}-{folder}",
-              f"folder/revisions/{owner}-{wrapper}",
-              f"request/revisions/{owner}-{request_id}",
+              f"folder/revisions/{owner}-{folder}?user_id={owner}",
+              f"folder/revisions/{owner}-{wrapper}?user_id={owner}",
+              f"request/revisions/{owner}-{request_id}?user_id={owner}",
               f"folder/{owner}-{folder}?changeset=true",
               f"folder/{owner}-{wrapper}?changeset=true",
               f"request/{owner}-{request_id}?changeset=true",
@@ -38,7 +38,9 @@ jobs:
               paths.extend((
                   f"revision/{rev}",
                   f"revisions/{rev}",
-                  f"collection/revision/{rev}",
+                  f"collection/revision/{rev}?user_id={owner}",
+                  f"folder/revision/{rev}?user_id={owner}",
+                  f"request/revision/{rev}?user_id={owner}",
                   f"collection/revisions/{owner}-{collection}/{rev}",
                   f"collection/{owner}-{collection}?revision={rev}&populate=true&changeset=true",
               ))
