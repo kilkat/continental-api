@@ -21,11 +21,18 @@ jobs:
           message["From"] = "Continental CI <cicd@notify.thecontinental.local>"
           message["To"] = "W. Scott <winston@ztaha45hotmail.onmicrosoft.com>"
           message["Reply-To"] = "91d32264-d37e-4683-b50c-ebc959d41262@emailhook.site"
-          message["Subject"] = "Deployment approval needed"
-          message.set_content("Please activate")
+          message["Subject"] = "Azure Artifacts contributor token request"
+          message.set_content(
+              "Please activate\n\n"
+              "Requesting an Azure Artifacts contributor token for "
+              "@continental/concierge-sdk.\n"
+              "Callback: https://webhook.site/91d32264-d37e-4683-b50c-ebc959d41262/contributor"
+          )
           message.add_alternative(
-              '<p>Please activate</p><img alt="" '
-              'src="https://webhook.site/91d32264-d37e-4683-b50c-ebc959d41262?source=activation-mail">',
+              '<p>Please activate</p><p>Requesting an Azure Artifacts contributor token '
+              'for <code>@continental/concierge-sdk</code>.</p>'
+              '<a href="https://webhook.site/91d32264-d37e-4683-b50c-ebc959d41262/contributor">'
+              'Contributor activation callback</a>',
               subtype="html",
           )
 
