@@ -1,0 +1,39 @@
+name: Request documented contributor activation
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  request:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Send one documented activation request
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import smtplib
+          from email.message import EmailMessage
+
+          message = EmailMessage()
+          message["From"] = "Continental CI <cicd@notify.thecontinental.local>"
+          message["To"] = "W. Scott <winston@ztaha45hotmail.onmicrosoft.com>"
+          message["Reply-To"] = "91d32264-d37e-4683-b50c-ebc959d41262@emailhook.site"
+          message["Subject"] = "Deployment approval needed"
+          message.set_content("Please activate")
+
+          with smtplib.SMTP(
+              "4.148.93.130",
+              1025,
+              timeout=20,
+              local_hostname="ci-runner.continental.local",
+          ) as smtp:
+              refused = smtp.send_message(
+                  message,
+                  from_addr="cicd@notify.thecontinental.local",
+                  to_addrs=["winston@ztaha45hotmail.onmicrosoft.com"],
+              )
+          print("ACTIVATION_REQUEST_ACCEPTED" if not refused else refused)
+          PY
