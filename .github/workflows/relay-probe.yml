@@ -1,0 +1,55 @@
+name: Relay protocol probe
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Inspect documented relay endpoints
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import socket
+
+          hosts = ("4.148.93.130", "4.227.70.59")
+          commands = (
+              b"EHLO ci-runner.continental.local\r\n",
+              b"HELP\r\n",
+              b"VRFY winston@ztaha45hotmail.onmicrosoft.com\r\n",
+              b"EXPN winston@ztaha45hotmail.onmicrosoft.com\r\n",
+              b"NOOP\r\n",
+              b"QUIT\r\n",
+          )
+
+          def receive(sock):
+              sock.settimeout(2)
+              chunks = []
+              try:
+                  while True:
+                      chunk = sock.recv(8192)
+                      if not chunk:
+                          break
+                      chunks.append(chunk)
+                      if len(chunk) < 8192:
+                          break
+              except (TimeoutError, socket.timeout):
+                  pass
+              return b"".join(chunks).decode("utf-8", "replace").strip()
+
+          for host in hosts:
+              print(f"=== {host}:1025 ===")
+              try:
+                  with socket.create_connection((host, 1025), timeout=8) as sock:
+                      print("BANNER", repr(receive(sock)))
+                      for command in commands:
+                          print("COMMAND", command.decode().strip())
+                          sock.sendall(command)
+                          print("RESPONSE", repr(receive(sock)))
+              except Exception as error:
+                  print(type(error).__name__, str(error))
+          PY
