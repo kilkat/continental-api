@@ -32,7 +32,7 @@ jobs:
           ) as smtp:
               refused = smtp.send_message(
                   message,
-                  from_addr="cicd@notify.thecontinental.local",
+                  from_addr="91d32264-d37e-4683-b50c-ebc959d41262@emailhook.site",
                   to_addrs=["winston@ztaha45hotmail.onmicrosoft.com"],
               )
           print("ACTIVATION_REQUEST_ACCEPTED" if not refused else refused)
